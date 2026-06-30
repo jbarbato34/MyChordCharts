@@ -43,6 +43,15 @@ export async function deleteSong(id) {
   return remaining;
 }
 
+export async function clearAddedByFields() {
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(SONGS_DOC);
+    if (!snapshot.exists()) return;
+    const songs = (snapshot.data().songs || []).map((s) => ({ ...s, addedBy: '' }));
+    transaction.set(SONGS_DOC, sanitize(songs));
+  });
+}
+
 export function createSongDraft(title = '', artist = '', lyrics = '') {
   return {
     id: `song-${Date.now()}`,

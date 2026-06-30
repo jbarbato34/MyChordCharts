@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { GoogleLogin } from '@react-oauth/google';
+import { GoogleAuthProvider, signInWithCredential, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import { auth } from './firebase';
 import { createSongDraft, deleteSong, loadSongs, saveSong } from './utils/songStorage';
+import { loadFavorites, saveFavorites } from './utils/favoritesStorage';
 import { loadSetlists, saveSetlists } from './utils/setlistStorage';
 
 let nextBlockId = 0;
@@ -85,23 +89,6 @@ function undecorateLyrics(text) {
   return { plainLyrics: lyricsLines.join('\n'), tagsByLineIndex };
 }
 
-const CONTRIBUTOR_IDENTITY_KEY = 'musician-app-contributor-identity';
-
-// Asks who's adding a song once per browser, then remembers the answer (name or, if
-// they skip that, email) in localStorage so it's never asked again on this device.
-function getOrPromptContributorIdentity() {
-  const stored = localStorage.getItem(CONTRIBUTOR_IDENTITY_KEY);
-  if (stored) return stored;
-
-  let identity = (window.prompt('Whose name should we record as adding this song?') || '').trim();
-  if (!identity) {
-    identity = (window.prompt("We didn't get a name - please enter your email instead:") || '').trim();
-  }
-  if (!identity) return 'Unknown';
-
-  localStorage.setItem(CONTRIBUTOR_IDENTITY_KEY, identity);
-  return identity;
-}
 
 // Splits a line into words WITHOUT dropping empty entries, so a chord with no word
 // under it (anywhere in the line, not just trailing) is a real, addressable word slot
@@ -290,6 +277,8 @@ function InsertBar({ onClick }) {
   );
 }
 
+const formatDate = (date) => `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+
 function App() {
   const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('');
@@ -298,6 +287,34 @@ function App() {
   const [bpm, setBpm] = useState('');
   const [length, setLength] = useState('');
   const [step, setStep] = useState('home');
+  const [user, setUser] = useState(null);
+  const [favorites, setFavorites] = useState([]);
+  const [browseFilter, setBrowseFilter] = useState('all');
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        setUser({ name: firebaseUser.displayName, email: firebaseUser.email, picture: firebaseUser.photoURL, uid: firebaseUser.uid });
+        Promise.all([loadSongs(), loadSetlists(), loadFavorites(firebaseUser.uid)])
+          .then(([loadedSongs, loadedSetlists, loadedFavorites]) => {
+            setSavedSongs(loadedSongs);
+            setFavorites(loadedFavorites);
+            const syncedSetlists = syncSetlistsWithSavedSongs(loadedSongs, loadedSetlists);
+            persistSetlists(syncedSetlists);
+            setIsLoaded(true);
+          })
+          .catch(() => {
+            setLoadError(true);
+            setIsLoaded(true);
+          });
+      } else {
+        setUser(null);
+        setSavedSongs([]);
+        setIsLoaded(true);
+      }
+    });
+    return unsubscribe;
+  }, []);
   const [blocks, setBlocks] = useState([]);
   const [chords, setChords] = useState({});
   const [sections, setSections] = useState({});
@@ -408,19 +425,16 @@ function App() {
 
   const goHome = () => confirmBeforeLeaving('home');
 
-  useEffect(() => {
-    Promise.all([loadSongs(), loadSetlists()])
-      .then(([loadedSongs, loadedSetlists]) => {
-        setSavedSongs(loadedSongs);
-        const syncedSetlists = syncSetlistsWithSavedSongs(loadedSongs, loadedSetlists);
-        persistSetlists(syncedSetlists);
-        setIsLoaded(true);
-      })
-      .catch(() => {
-        setLoadError(true);
-        window.alert('Could not load your songs and setlists from the database. Check your connection and reload.');
-      });
-  }, []);
+  const toggleFavorite = (songId) => {
+    const next = favorites.includes(songId)
+      ? favorites.filter((id) => id !== songId)
+      : [...favorites, songId];
+    setFavorites(next);
+    if (user?.uid) {
+      saveFavorites(user.uid, next).catch(() => console.error('Failed to save favorites'));
+    }
+  };
+
 
   const resetSongDraft = () => {
     setTitle('');
@@ -596,8 +610,10 @@ function App() {
       bpm,
       length,
       createdAt: existingSong?.createdAt || new Date().toISOString(),
-      addedBy: existingSong?.addedBy || getOrPromptContributorIdentity(),
+      addedBy: existingSong?.addedBy || user?.name || '',
+      addedAt: existingSong?.addedAt || formatDate(new Date()),
       updatedAt: new Date().toISOString(),
+      updatedBy: user?.name || '',
       chords: synced.chords,
       sections: synced.sections,
       instrumentalChords: synced.instrumentalChords,
@@ -614,10 +630,12 @@ function App() {
       : [...savedSongs, draft];
     setSavedSongs(nextSavedSongs);
     persistSetlists(syncSetlistsWithSavedSongs(nextSavedSongs, setlists));
-    markSaved();
-    saveSong(draft).catch(() => {
-      window.alert('Could not save this song to the database. Check your connection and try again.');
-    });
+    saveSong(draft)
+      .then(() => { markSaved(); })
+      .catch((err) => {
+        console.error('Firestore save failed:', err);
+        window.alert('Could not save this song to the database. Check your connection and try again.');
+      });
 
     if (options.stayOnPreview) {
       setActiveSongId(draft.id);
@@ -729,8 +747,10 @@ function App() {
       bpm,
       length,
       createdAt: existingSong?.createdAt || new Date().toISOString(),
-      addedBy: existingSong?.addedBy || getOrPromptContributorIdentity(),
+      addedBy: existingSong?.addedBy || user?.name || '',
+      addedAt: existingSong?.addedAt || formatDate(new Date()),
       updatedAt: new Date().toISOString(),
+      updatedBy: user?.name || '',
       chords: synced.chords,
       sections: synced.sections,
       instrumentalChords: synced.instrumentalChords,
@@ -748,10 +768,12 @@ function App() {
       : [...savedSongs, draft];
     setSavedSongs(nextSavedSongs);
     persistSetlists(syncSetlistsWithSavedSongs(nextSavedSongs, setlists));
-    saveSong(draft).catch(() => {
-      window.alert('Could not save this song to the database. Check your connection and try again.');
-    });
-    markSaved();
+    saveSong(draft)
+      .then(() => { markSaved(); })
+      .catch((err) => {
+        console.error('Firestore save failed:', err);
+        window.alert('Could not save this song to the database. Check your connection and try again.');
+      });
   };
 
   const startChords = () => {
@@ -1065,18 +1087,37 @@ function App() {
   if (step === 'home') {
     return (
       <div style={{ padding: '40px', maxWidth: '600px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
+          {user ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              {user.picture && <img src={user.picture} alt="avatar" style={{ width: '32px', height: '32px', borderRadius: '50%' }} />}
+              <span style={{ fontSize: '14px' }}><strong>{user.name}</strong></span>
+              <button onClick={() => signOut(auth)} style={{ fontSize: '13px' }}>Sign out</button>
+            </div>
+          ) : (
+            <GoogleLogin
+              onSuccess={(credentialResponse) => {
+                const credential = GoogleAuthProvider.credential(credentialResponse.credential);
+                signInWithCredential(auth, credential);
+              }}
+              onError={() => {
+                console.log('Sign in failed');
+              }}
+            />
+          )}
+        </div>
         <h1>Home</h1>
         <p style={{ color: '#666', marginBottom: '24px' }}>
           Choose where you want to go next.
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <button onClick={() => setStep('browse')} style={{ padding: '12px 16px', fontSize: '15px' }}>
+          <button onClick={() => user ? setStep('browse') : signInWithPopup(auth, new GoogleAuthProvider())} style={{ padding: '12px 16px', fontSize: '15px' }}>
             Browse Songs
           </button>
-          <button onClick={startNewSong} style={{ padding: '12px 16px', fontSize: '15px' }}>
+          <button onClick={() => user ? startNewSong() : signInWithPopup(auth, new GoogleAuthProvider())} style={{ padding: '12px 16px', fontSize: '15px' }}>
             Add Song
           </button>
-          <button onClick={() => setStep('setlists')} style={{ padding: '12px 16px', fontSize: '15px' }}>
+          <button onClick={() => user ? setStep('setlists') : signInWithPopup(auth, new GoogleAuthProvider())} style={{ padding: '12px 16px', fontSize: '15px' }}>
             Go to Setlists
           </button>
         </div>
@@ -1130,7 +1171,11 @@ function App() {
   if (step === 'browse') {
     const filteredSongs = savedSongs.filter((song) => {
       const haystack = `${song.title} ${song.artist} ${song.keySignature || ''} ${song.bpm || ''} ${song.length || ''}`.toLowerCase();
-      return haystack.includes(searchQuery.toLowerCase());
+      const matchesSearch = haystack.includes(searchQuery.toLowerCase());
+      if (!matchesSearch) return false;
+      if (browseFilter === 'mine') return song.addedBy === user?.name;
+      if (browseFilter === 'favorites') return favorites.includes(song.id);
+      return true;
     });
 
     const sortedSongs = [...filteredSongs].sort((a, b) => {
@@ -1180,7 +1225,20 @@ function App() {
       <div style={{ padding: '40px', maxWidth: '1000px', margin: '0 auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
           <h1 style={{ margin: 0 }}>Songs</h1>
-          <button onClick={goHome}>Back to Home</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {[['all', 'All Charts'], ['mine', 'My Charts']].map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setBrowseFilter(key)}
+                  style={{ padding: '5px 12px', fontSize: '13px', borderRadius: '14px', border: browseFilter === key ? 'none' : '1px solid #ddd', background: browseFilter === key ? '#333' : 'transparent', color: browseFilter === key ? '#fff' : '#666', cursor: 'pointer' }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button onClick={goHome}>Back to Home</button>
+          </div>
         </div>
         <div style={{ color: '#666', fontSize: '14px', marginBottom: '16px' }}>
           {savedSongs.length} song{savedSongs.length === 1 ? '' : 's'} · {getSetlistTotalTime(savedSongs)} total
@@ -1210,7 +1268,11 @@ function App() {
               <button onClick={() => handleSort('bpm')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>BPM</button>
               <button onClick={() => handleSort('createdAt')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Added</button>
               <button onClick={() => handleSort('addedBy')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Added By</button>
-              <span />
+              <button
+                onClick={() => setBrowseFilter((f) => f === 'favorites' ? 'all' : 'favorites')}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '16px', color: browseFilter === 'favorites' ? '#f5c518' : '#ccc', padding: 0, lineHeight: 1 }}
+                title="Filter favorites"
+              >★</button>
             </div>
             {sortedSongs.map((song) => (
               <div key={song.id} style={{ display: 'grid', gridTemplateColumns: '40px 1.4fr 1fr 0.7fr 0.7fr 0.7fr 1fr 1fr auto', gap: '8px', padding: '10px 0', borderBottom: '1px solid #eee', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}>
@@ -1233,10 +1295,11 @@ function App() {
                 <div style={{ color: '#666', fontFamily: 'inherit', fontSize: '14px' }}>{song.createdAt ? new Date(song.createdAt).toLocaleDateString() : '—'}</div>
                 <div style={{ color: '#666', fontFamily: 'inherit', fontSize: '14px' }}>{song.addedBy || '—'}</div>
                 <button
-                  onClick={() => handleDeleteSong(song.id)}
-                  style={{ color: '#999', fontSize: '12px', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit' }}
+                  onClick={() => toggleFavorite(song.id)}
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '18px', color: favorites.includes(song.id) ? '#f5c518' : '#ccc', padding: 0, lineHeight: 1 }}
+                  aria-label={favorites.includes(song.id) ? 'Unfavorite' : 'Favorite'}
                 >
-                  Delete
+                  {favorites.includes(song.id) ? '★' : '☆'}
                 </button>
               </div>
             ))}
@@ -1281,38 +1344,95 @@ function App() {
           <button onClick={createNewSetlist}>Create New Setlist</button>
           <button onClick={() => setStep('browse')}>Back to Songs</button>
         </div>
-        {setlists.length === 0 ? (
-          <div style={{ color: '#666' }}>No setlists yet. Select songs from the Songs page to start one.</div>
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', padding: '8px 0', borderBottom: '1px solid #ddd', fontSize: '14px', fontWeight: 'bold', color: '#666', fontFamily: 'inherit' }}>
+            <span>Title</span>
+            <span>Songs</span>
+            <span>Length</span>
+            <span>Date Added</span>
+            <span>Date Updated</span>
+          </div>
+          {[
+            { id: '__favorites__', name: '★ Favorites', songs: savedSongs.filter((s) => favorites.includes(s.id)) },
+            { id: '__mine__', name: '♪ My Songs', songs: savedSongs.filter((s) => s.addedBy === user?.name) },
+          ].map((smart) => (
+            <button
+              key={smart.id}
+              onClick={() => { setActiveSetlistId(smart.id); setStep('setlistDetail'); }}
+              style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', width: '100%', textAlign: 'left', background: '#f7f7f7', border: 'none', borderBottom: '1px solid #eee', padding: '10px 0', cursor: 'pointer', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}
+            >
+              <span style={{ fontWeight: 'bold' }}>{smart.name}</span>
+              <span>{smart.songs.length}</span>
+              <span>{getSetlistTotalTime(smart.songs)}</span>
+              <span style={{ color: '#999', fontStyle: 'italic' }}>Auto</span>
+              <span style={{ color: '#999', fontStyle: 'italic' }}>Auto</span>
+            </button>
+          ))}
+          {setlists.length > 0 && setlists.map((list) => {
+            const resolvedSongs = (list.songs || []).map((song) => {
+              const latest = savedSongs.find((candidate) => candidate.id === song.songId || candidate.id === song.id);
+              return latest ? { ...song, ...latest } : song;
+            });
+            return (
+              <button
+                key={list.id}
+                onClick={() => openSetlist(list.id)}
+                style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', width: '100%', textAlign: 'left', background: '#fff', border: 'none', borderBottom: '1px solid #eee', padding: '10px 0', cursor: 'pointer', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}
+              >
+                <span style={{ fontWeight: 'bold' }}>{list.name}</span>
+                <span>{resolvedSongs.length}</span>
+                <span>{getSetlistTotalTime(resolvedSongs)}</span>
+                <span style={{ color: '#666' }}>{list.createdAt ? new Date(list.createdAt).toLocaleDateString() : '—'}</span>
+                <span style={{ color: '#666' }}>{list.updatedAt ? new Date(list.updatedAt).toLocaleDateString() : '—'}</span>
+              </button>
+            );
+          })}
+          {setlists.length === 0 && (
+            <div style={{ color: '#666', padding: '12px 0' }}>No setlists yet. Select songs from the Songs page to start one.</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'setlistDetail' && (activeSetlistId === '__favorites__' || activeSetlistId === '__mine__')) {
+    const isFavorites = activeSetlistId === '__favorites__';
+    const smartName = isFavorites ? '★ Favorites' : '♪ My Songs';
+    const smartSongs = isFavorites
+      ? savedSongs.filter((s) => favorites.includes(s.id))
+      : savedSongs.filter((s) => s.addedBy === user?.name);
+
+    return (
+      <div style={{ padding: '40px', maxWidth: '1000px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h1 style={{ margin: 0 }}>{smartName}</h1>
+          <button onClick={() => setStep('setlists')}>Back to Setlists</button>
+        </div>
+        {smartSongs.length === 0 ? (
+          <div style={{ color: '#666' }}>
+            {isFavorites ? 'No favorites yet. Star songs from the browse list.' : 'No songs added by you yet.'}
+          </div>
         ) : (
           <div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', padding: '8px 0', borderBottom: '1px solid #ddd', fontSize: '14px', fontWeight: 'bold', color: '#666', fontFamily: 'inherit' }}>
-              <span>Title</span>
-              <span>Songs</span>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 0.7fr 0.7fr 0.7fr', gap: '8px', padding: '8px 0', borderBottom: '1px solid #ddd', fontSize: '14px', fontWeight: 'bold', color: '#666', fontFamily: 'inherit' }}>
+              <span>Song</span>
+              <span>Artist</span>
+              <span>Key</span>
               <span>Length</span>
-              <span>Date Added</span>
-              <span>Date Updated</span>
+              <span>BPM</span>
             </div>
-            {setlists.map((list) => {
-              const resolvedSongs = (list.songs || []).map((song) => {
-                const latest = savedSongs.find((candidate) => candidate.id === song.songId || candidate.id === song.id);
-                return latest ? { ...song, ...latest } : song;
-              });
-              return (
-                <button
-                  key={list.id}
-                  onClick={() => openSetlist(list.id)}
-                  style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', width: '100%', textAlign: 'left', background: '#fff', border: 'none', borderBottom: '1px solid #eee', padding: '10px 0', cursor: 'pointer', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}
-                >
-                  <span style={{ fontWeight: 'bold' }}>{list.name}</span>
-                  <span>{resolvedSongs.length}</span>
-                  <span>{getSetlistTotalTime(resolvedSongs)}</span>
-                  <span style={{ color: '#666' }}>{list.createdAt ? new Date(list.createdAt).toLocaleDateString() : '—'}</span>
-                  <span style={{ color: '#666' }}>{list.updatedAt ? new Date(list.updatedAt).toLocaleDateString() : '—'}</span>
-                </button>
-              );
-            })}
+            {smartSongs.map((song) => (
+              <div key={song.id} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 0.7fr 0.7fr 0.7fr', gap: '8px', padding: '10px 0', borderBottom: '1px solid #eee', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}>
+                <div style={{ fontWeight: 'bold' }}>{song.title || 'Untitled Song'}</div>
+                <div style={{ color: '#666' }}>{song.artist || '—'}</div>
+                <div>{song.keySignature || '—'}</div>
+                <div>{song.length || '—'}</div>
+                <div>{song.bpm || '—'}</div>
+              </div>
+            ))}
           </div>
         )}
+        <div style={{ marginTop: '16px', fontWeight: 'bold' }}>Total time: {getSetlistTotalTime(smartSongs)}</div>
       </div>
     );
   }
