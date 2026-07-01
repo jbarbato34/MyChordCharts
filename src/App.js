@@ -140,36 +140,34 @@ function groupBlocksIntoSections(blocks, sections) {
   const groups = [];
   let current = null;
 
-  blocks.forEach((block) => {
-    const label = sections[block.id];
-    const isBlank = block.text.trim() === '';
+  for (const block of blocks) {
+    const label = sections[block.id]; // undefined = not a section start; any string = section starts here
 
-    if (isBlank) {
-      groups.push({ label: label || null, blocks: [block] });
-      current = null;
-      return;
-    }
-
-    if (label) {
+    if (label !== undefined) {
       current = { label, blocks: [block] };
       groups.push(current);
-      return;
-    }
-
-    if (current) {
+    } else if (current) {
       current.blocks.push(block);
     } else {
-      groups.push({ label: null, blocks: [block] });
+      const last = groups[groups.length - 1];
+      if (last && last.label === null) {
+        last.blocks.push(block);
+      } else {
+        groups.push({ label: null, blocks: [block] });
+      }
     }
-  });
+  }
 
   return groups;
 }
 
+const CHORD_COLOR = '#6699cc';
+
 const CHORD_INPUT_STYLE = {
-  color: 'blue', fontWeight: 'bold', border: 'none', borderBottom: '1px dashed #ccc',
-  background: 'transparent', fontSize: '14px', width: '48px', textAlign: 'center',
-  outline: 'none', fontFamily: 'inherit', padding: '2px 0', cursor: 'text',
+  position: 'absolute', top: '-15px', left: 0,
+  color: CHORD_COLOR, fontWeight: '600', border: 'none', borderBottom: '1px solid #ddd',
+  background: 'transparent', fontSize: '13px', width: '56px',
+  outline: 'none', fontFamily: 'inherit', padding: '1px 0', cursor: 'text', lineHeight: 1,
 };
 
 const SECTION_INPUT_STYLE = {
@@ -178,8 +176,16 @@ const SECTION_INPUT_STYLE = {
 };
 
 const WORD_INPUT_STYLE = {
-  border: 'none', background: 'transparent', fontSize: '16px', textAlign: 'center',
+  border: 'none', background: 'transparent', fontSize: '16px',
   outline: 'none', fontFamily: 'inherit', padding: 0, color: 'inherit',
+};
+
+// For chord-only rows (instrumental blocks): same visual as CHORD_INPUT_STYLE but
+// NOT position:absolute — inputs live in normal flex flow so they're actually visible.
+const CHORD_SLOT_INPUT_STYLE = {
+  color: CHORD_COLOR, fontWeight: '600', border: 'none', borderBottom: '1px solid #ddd',
+  background: 'transparent', fontSize: '13px', width: '56px',
+  outline: 'none', fontFamily: 'inherit', padding: '1px 0', cursor: 'text', lineHeight: 1,
 };
 
 // Shift+Enter jumps straight to the next line's first field instead of tabbing through
@@ -227,7 +233,7 @@ function focusAdjacentWordOnTab(e) {
 // ready to type into. Typing into it commits it as a real slot (and a new empty one
 // appears after). Backspace in an empty slot removes the slot before it - the trailing
 // blank slot itself is never removed, since backspace there removes its predecessor, not itself.
-function ChordSlotRow({ blockId, slots, onChange, onRemove }) {
+function ChordSlotRow({ blockId, slots, onChange, onRemove, onEnter, onDeleteLine }) {
   const displaySlots = [...slots, ''];
 
   return (
@@ -241,13 +247,23 @@ function ChordSlotRow({ blockId, slots, onChange, onRemove }) {
           onChange={(e) => onChange(slotIndex, e.target.value)}
           onKeyDown={(e) => {
             focusNextLineOnShiftEnter(e);
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              onEnter?.();
+              return;
+            }
+            if (e.key === 'Backspace' && chord === '' && slotIndex === 0 && slots.every(s => !s)) {
+              e.preventDefault();
+              onDeleteLine?.();
+              return;
+            }
             if (e.key === 'Backspace' && chord === '' && slotIndex > 0) {
               e.preventDefault();
               onRemove(slotIndex - 1);
             }
           }}
           placeholder="+"
-          style={CHORD_INPUT_STYLE}
+          style={CHORD_SLOT_INPUT_STYLE}
         />
       ))}
     </>
@@ -272,7 +288,38 @@ function InsertBar({ onClick }) {
         transition: 'all 0.15s'
       }}
     >
-      {hover ? '+ Insert section here' : ''}
+      {hover ? '+ Insert line here' : ''}
+    </div>
+  );
+}
+
+function SectionToggleStrip({ isSectionStart, onToggle }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      title={isSectionStart ? 'Remove section start' : 'Start section here'}
+      style={{
+        width: '22px',
+        flexShrink: 0,
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'center',
+        paddingTop: '2px',
+        userSelect: 'none',
+      }}
+    >
+      <span style={{
+        fontSize: '11px',
+        color: isSectionStart ? '#888' : hover ? '#aaa' : '#ddd',
+        transition: 'color 0.12s',
+        lineHeight: 1,
+      }}>
+        {isSectionStart ? '▶' : '▷'}
+      </span>
     </div>
   );
 }
@@ -290,6 +337,7 @@ function App() {
   const [user, setUser] = useState(null);
   const [favorites, setFavorites] = useState([]);
   const [browseFilter, setBrowseFilter] = useState('all');
+  const [signInPrompt, setSignInPrompt] = useState('');
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
@@ -324,8 +372,8 @@ function App() {
   const [activeSongId, setActiveSongId] = useState(null);
   const [isEditingSong, setIsEditingSong] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [sortKey, setSortKey] = useState('updatedAt');
-  const [sortDirection, setSortDirection] = useState('desc');
+  const [sortKey, setSortKey] = useState('title');
+  const [sortDirection, setSortDirection] = useState('asc');
   const [setlists, setSetlists] = useState([]);
   const [activeSetlistId, setActiveSetlistId] = useState(null);
   const [selectedSongIds, setSelectedSongIds] = useState([]);
@@ -335,6 +383,9 @@ function App() {
   const [pendingRemoveSetlistSong, setPendingRemoveSetlistSong] = useState(null);
   const lyricsDecoratedRef = useRef(false);
   const pendingFocusKeyRef = useRef(null);
+  const historyRef = useRef([]);
+  const typingSessionRef = useRef(false);
+  const typingTimerRef = useRef(null);
 
   useEffect(() => {
     if (pendingFocusKeyRef.current) {
@@ -349,6 +400,50 @@ function App() {
 
   const markDirty = () => setHasUnsavedChanges(true);
   const markSaved = () => setHasUnsavedChanges(false);
+
+  const captureHistory = () => {
+    historyRef.current = [
+      ...historyRef.current.slice(-49),
+      {
+        blocks: blocks.map(b => ({ ...b })),
+        chords: { ...chords },
+        sections: { ...sections },
+        instrumentalChords: Object.fromEntries(
+          Object.entries(instrumentalChords).map(([k, v]) => [k, [...(v || [])]])
+        ),
+      },
+    ];
+  };
+
+  const captureHistoryBeforeTyping = () => {
+    if (!typingSessionRef.current) {
+      captureHistory();
+      typingSessionRef.current = true;
+    }
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      typingSessionRef.current = false;
+      typingTimerRef.current = null;
+    }, 800);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey && step === 'chords') {
+        if (historyRef.current.length === 0) return;
+        e.preventDefault();
+        const prev = historyRef.current[historyRef.current.length - 1];
+        historyRef.current = historyRef.current.slice(0, -1);
+        setBlocks(prev.blocks);
+        setChords(prev.chords);
+        setSections(prev.sections);
+        setInstrumentalChords(prev.instrumentalChords);
+        setHasUnsavedChanges(true);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [step]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The single point where blocks are kept honest against the lyrics textarea: reconciles
   // blocks/lyrics via an LCS line diff, and - only when the textarea was showing [TAG] section
@@ -610,8 +705,8 @@ function App() {
       bpm,
       length,
       createdAt: existingSong?.createdAt || new Date().toISOString(),
-      addedBy: existingSong?.addedBy || user?.name || '',
-      addedAt: existingSong?.addedAt || formatDate(new Date()),
+      addedBy: existingSong ? (existingSong.addedBy || '') : (user?.name || ''),
+      addedAt: existingSong ? (existingSong.addedAt || '') : formatDate(new Date()),
       updatedAt: new Date().toISOString(),
       updatedBy: user?.name || '',
       chords: synced.chords,
@@ -665,16 +760,31 @@ function App() {
     setKeySignature(song.keySignature || '');
     setBpm(song.bpm || '');
     setLength(song.length || '');
-    setBlocks(
-      Array.isArray(song.blocks) && song.blocks.length > 0
-        ? song.blocks
-        : song.lyrics
-          ? song.lyrics.split('\n').map((line) => ({ id: newId(), text: line }))
-          : []
-    );
-    setChords(song.chords || {});
+
+    const loadedBlocks = Array.isArray(song.blocks) && song.blocks.length > 0
+      ? song.blocks
+      : song.lyrics ? song.lyrics.split('\n').map((line) => ({ id: newId(), text: line })) : [];
+
+    // Migrate any instrumentalChords stored on lyric blocks (text !== '') — these were
+    // orphaned by old data or a conversion path that didn't clean up. Without this,
+    // the preview shows them as extra chord slots while the editor shows nothing.
+    const loadedIC = { ...(song.instrumentalChords || {}) };
+    const loadedChords = { ...(song.chords || {}) };
+    loadedBlocks.forEach((block) => {
+      if (block.text.trim() !== '' && loadedIC[block.id]) {
+        (loadedIC[block.id] || []).forEach((slot, i) => {
+          if (slot && !loadedChords[`${block.id}-${i}`]) {
+            loadedChords[`${block.id}-${i}`] = slot;
+          }
+        });
+        delete loadedIC[block.id];
+      }
+    });
+
+    setBlocks(loadedBlocks);
+    setChords(loadedChords);
     setSections(song.sections || {});
-    setInstrumentalChords(song.instrumentalChords || {});
+    setInstrumentalChords(loadedIC);
     setHasUnsavedChanges(false);
     setIsEditingSong(false);
     setStep('preview');
@@ -747,8 +857,8 @@ function App() {
       bpm,
       length,
       createdAt: existingSong?.createdAt || new Date().toISOString(),
-      addedBy: existingSong?.addedBy || user?.name || '',
-      addedAt: existingSong?.addedAt || formatDate(new Date()),
+      addedBy: existingSong ? (existingSong.addedBy || '') : (user?.name || ''),
+      addedAt: existingSong ? (existingSong.addedAt || '') : formatDate(new Date()),
       updatedAt: new Date().toISOString(),
       updatedBy: user?.name || '',
       chords: synced.chords,
@@ -778,28 +888,77 @@ function App() {
 
   const startChords = () => {
     const synced = syncLyricsAndBlocks();
+    const migratedIC = { ...synced.instrumentalChords };
+    const migratedChords = { ...synced.chords };
+    synced.blocks.forEach((block) => {
+      if (block.text.trim() !== '' && migratedIC[block.id]) {
+        (migratedIC[block.id] || []).forEach((slot, i) => {
+          if (slot && !migratedChords[`${block.id}-${i}`]) {
+            migratedChords[`${block.id}-${i}`] = slot;
+          }
+        });
+        delete migratedIC[block.id];
+      }
+    });
     setLyrics(synced.lyrics);
     setBlocks(synced.blocks);
     setSections(synced.sections);
-    setChords(synced.chords);
-    setInstrumentalChords(synced.instrumentalChords);
+    setChords(migratedChords);
+    setInstrumentalChords(migratedIC);
     setStep('chords');
   };
 
   const updateChordValue = (blockId, wordIndex, value) => {
+    captureHistoryBeforeTyping();
     const key = `${blockId}-${wordIndex}`;
     setChords({ ...chords, [key]: value });
     markDirty();
   };
 
   const removeSection = (blockId) => {
+    captureHistory();
     const updated = { ...sections };
     delete updated[blockId];
     setSections(updated);
     markDirty();
   };
 
+  const convertInstrumentalToLyric = (blockId, text, blockIndex) => {
+    captureHistory();
+    // Remap existing chord slots onto word-chord positions so they don't disappear
+    const existingSlots = instrumentalChords[blockId] || [];
+    if (existingSlots.length > 0) {
+      const updatedChords = { ...chords };
+      existingSlots.forEach((slotChord, i) => {
+        if (slotChord) updatedChords[`${blockId}-${i}`] = slotChord;
+      });
+      setChords(updatedChords);
+    }
+    setBlocks(blocks.map(b => b.id === blockId ? { ...b, text } : b));
+    const lines = lyrics.split('\n');
+    lines[blockIndex] = text;
+    setLyrics(lines.join('\n'));
+    const updatedIC = { ...instrumentalChords };
+    delete updatedIC[blockId];
+    setInstrumentalChords(updatedIC);
+    markDirty();
+    pendingFocusKeyRef.current = `word-${blockId}-0`;
+  };
+
+  const toggleSectionAt = (blockId) => {
+    if (sections[blockId] !== undefined) {
+      removeSection(blockId);
+    } else {
+      captureHistory();
+      setSections({ ...sections, [blockId]: '' });
+      setEditingSectionBlockId(blockId);
+      pendingFocusKeyRef.current = `section-${blockId}`;
+      markDirty();
+    }
+  };
+
   const updateInstrumentalChordValue = (blockId, slotIndex, value) => {
+    captureHistoryBeforeTyping();
     const current = instrumentalChords[blockId] || [];
     const updated = [...current];
     updated[slotIndex] = value;
@@ -808,9 +967,50 @@ function App() {
   };
 
   const removeInstrumentalSlot = (blockId, slotIndex) => {
+    captureHistory();
     const current = instrumentalChords[blockId] || [];
     setInstrumentalChords({ ...instrumentalChords, [blockId]: current.filter((_, i) => i !== slotIndex) });
     pendingFocusKeyRef.current = `${blockId}-extra-${slotIndex}`;
+    markDirty();
+  };
+
+  const insertEmptyLineAt = (index) => {
+    captureHistory();
+    const id = newId();
+    const updatedBlocks = [...blocks];
+    updatedBlocks.splice(index, 0, { id, text: '' });
+    setBlocks(updatedBlocks);
+    const lines = lyrics.split('\n');
+    lines.splice(index, 0, '');
+    setLyrics(lines.join('\n'));
+    markDirty();
+    pendingFocusKeyRef.current = `${id}-extra-0`;
+  };
+
+  const deleteEmptyBlock = (blockId, currentGlobalIndex) => {
+    captureHistory();
+    const updatedBlocks = blocks.filter((b) => b.id !== blockId);
+    setBlocks(updatedBlocks);
+    const lines = lyrics.split('\n');
+    lines.splice(currentGlobalIndex, 1);
+    setLyrics(lines.join('\n'));
+    const updatedInstrumental = { ...instrumentalChords };
+    delete updatedInstrumental[blockId];
+    setInstrumentalChords(updatedInstrumental);
+    const updatedSections = { ...sections };
+    delete updatedSections[blockId];
+    setSections(updatedSections);
+    // focus the block above
+    if (currentGlobalIndex > 0) {
+      const prevBlock = blocks[currentGlobalIndex - 1];
+      if (prevBlock) {
+        const prevSlots = instrumentalChords[prevBlock.id] || [];
+        const prevIsInstrumental = prevBlock.text.trim() === '';
+        pendingFocusKeyRef.current = prevIsInstrumental
+          ? `${prevBlock.id}-extra-${prevSlots.length}`
+          : `${prevBlock.id}-${Math.max(0, getWords(prevBlock.text).length - 1)}`;
+      }
+    }
     markDirty();
   };
 
@@ -835,6 +1035,7 @@ function App() {
   // a section boundary.
   const mergeBlockIntoPrevious = (currentGlobalIndex) => {
     if (currentGlobalIndex <= 0) return;
+    captureHistory();
     const prevBlock = blocks[currentGlobalIndex - 1];
     const curBlock = blocks[currentGlobalIndex];
     if (sections[curBlock.id]) return;
@@ -877,6 +1078,7 @@ function App() {
   // Word-processor-style Enter: splits the line at the given word, pushing that word
   // and everything after it onto a brand-new line, with their chords following along.
   const splitBlockAtWord = (currentGlobalIndex, wordIndex) => {
+    captureHistory();
     const block = blocks[currentGlobalIndex];
     const words = getWords(block.text);
     const textBefore = words.slice(0, wordIndex).join(' ');
@@ -917,6 +1119,7 @@ function App() {
   };
 
   const updateWordText = (blockId, wordIndex, newText) => {
+    captureHistoryBeforeTyping();
     const block = blocks.find((b) => b.id === blockId);
     const words = getWords(block.text);
     words[wordIndex] = newText;
@@ -934,6 +1137,7 @@ function App() {
   // word at this position, shifting this chord and every later one up by one index,
   // so adding a word feels the same whether you're focused on the chord or the word.
   const insertWordAt = (blockId, wordIndex) => {
+    captureHistory();
     const block = blocks.find((b) => b.id === blockId);
     const words = getWords(block.text);
     const newWords = [...words];
@@ -1111,16 +1315,19 @@ function App() {
           Choose where you want to go next.
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <button onClick={() => user ? setStep('browse') : signInWithPopup(auth, new GoogleAuthProvider())} style={{ padding: '12px 16px', fontSize: '15px' }}>
+          <button onClick={() => { if (user) { setSignInPrompt(''); setStep('browse'); } else { setSignInPrompt('You must be signed in to browse songs.'); signInWithPopup(auth, new GoogleAuthProvider()).then(() => setSignInPrompt('')); } }} style={{ padding: '12px 16px', fontSize: '15px' }}>
             Browse Songs
           </button>
-          <button onClick={() => user ? startNewSong() : signInWithPopup(auth, new GoogleAuthProvider())} style={{ padding: '12px 16px', fontSize: '15px' }}>
+          <button onClick={() => { if (user) { setSignInPrompt(''); startNewSong(); } else { setSignInPrompt('You must be signed in to add a song.'); signInWithPopup(auth, new GoogleAuthProvider()).then(() => setSignInPrompt('')); } }} style={{ padding: '12px 16px', fontSize: '15px' }}>
             Add Song
           </button>
-          <button onClick={() => user ? setStep('setlists') : signInWithPopup(auth, new GoogleAuthProvider())} style={{ padding: '12px 16px', fontSize: '15px' }}>
+          <button onClick={() => { if (user) { setSignInPrompt(''); setStep('setlists'); } else { setSignInPrompt('You must be signed in to view setlists.'); signInWithPopup(auth, new GoogleAuthProvider()).then(() => setSignInPrompt('')); } }} style={{ padding: '12px 16px', fontSize: '15px' }}>
             Go to Setlists
           </button>
         </div>
+        {signInPrompt && (
+          <p style={{ marginTop: '16px', color: '#c0392b', fontSize: '14px' }}>{signInPrompt}</p>
+        )}
       </div>
     );
   }
@@ -1170,7 +1377,7 @@ function App() {
 
   if (step === 'browse') {
     const filteredSongs = savedSongs.filter((song) => {
-      const haystack = `${song.title} ${song.artist} ${song.keySignature || ''} ${song.bpm || ''} ${song.length || ''}`.toLowerCase();
+      const haystack = `${song.title} ${song.artist} ${song.keySignature || ''} ${song.bpm || ''} ${song.length || ''} ${song.addedBy || ''}`.toLowerCase();
       const matchesSearch = haystack.includes(searchQuery.toLowerCase());
       if (!matchesSearch) return false;
       if (browseFilter === 'mine') return song.addedBy === user?.name;
@@ -1256,11 +1463,30 @@ function App() {
           </button>
         </div>
         {filteredSongs.length === 0 ? (
-          <div style={{ color: '#666', padding: '12px 0' }}>No songs yet. Save one from the Add Song page.</div>
+          <div style={{ padding: '12px 0' }}>
+            <span style={{ color: '#666' }}>
+              {browseFilter === 'favorites'
+                ? 'No favorites yet — star a song to add it here.'
+                : browseFilter === 'mine'
+                  ? "You haven't added any songs yet."
+                  : 'No songs yet. Save one from the Add Song page.'}
+            </span>
+            {browseFilter !== 'all' && (
+              <button
+                onClick={() => setBrowseFilter('all')}
+                style={{ marginLeft: '12px', background: 'transparent', border: '1px solid #ccc', borderRadius: '12px', padding: '3px 10px', fontSize: '12px', cursor: 'pointer', color: '#555' }}
+              >View all charts</button>
+            )}
+          </div>
         ) : (
           <div>
-            <div style={{ display: 'grid', gridTemplateColumns: '40px 1.4fr 1fr 0.7fr 0.7fr 0.7fr 1fr 1fr auto', gap: '8px', padding: '8px 0', borderBottom: '1px solid #ddd', fontSize: '14px', fontWeight: 'bold', color: '#666', fontFamily: 'inherit' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '40px auto 1.4fr 1fr 0.7fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', padding: '8px 0', borderBottom: '1px solid #ddd', fontSize: '14px', fontWeight: 'bold', color: '#666', fontFamily: 'inherit' }}>
               <span />
+              <button
+                onClick={() => setBrowseFilter((f) => f === 'favorites' ? 'all' : 'favorites')}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '16px', color: browseFilter === 'favorites' ? '#f5c518' : '#ccc', padding: 0, lineHeight: 1 }}
+                title="Filter favorites"
+              >★</button>
               <button onClick={() => handleSort('title')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Title</button>
               <button onClick={() => handleSort('artist')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Artist</button>
               <button onClick={() => handleSort('key')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Key</button>
@@ -1268,20 +1494,22 @@ function App() {
               <button onClick={() => handleSort('bpm')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>BPM</button>
               <button onClick={() => handleSort('createdAt')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Added</button>
               <button onClick={() => handleSort('addedBy')} style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}>Added By</button>
-              <button
-                onClick={() => setBrowseFilter((f) => f === 'favorites' ? 'all' : 'favorites')}
-                style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '16px', color: browseFilter === 'favorites' ? '#f5c518' : '#ccc', padding: 0, lineHeight: 1 }}
-                title="Filter favorites"
-              >★</button>
             </div>
             {sortedSongs.map((song) => (
-              <div key={song.id} style={{ display: 'grid', gridTemplateColumns: '40px 1.4fr 1fr 0.7fr 0.7fr 0.7fr 1fr 1fr auto', gap: '8px', padding: '10px 0', borderBottom: '1px solid #eee', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}>
+              <div key={song.id} style={{ display: 'grid', gridTemplateColumns: '40px auto 1.4fr 1fr 0.7fr 0.7fr 0.7fr 1fr 1fr', gap: '8px', padding: '10px 0', borderBottom: '1px solid #eee', alignItems: 'center', fontFamily: 'inherit', fontSize: '14px' }}>
                 <input
                   type="checkbox"
                   checked={selectedSongIds.includes(song.id)}
                   onChange={() => toggleSongSelection(song.id)}
                   aria-label={`Select ${song.title || 'Untitled Song'}`}
                 />
+                <button
+                  onClick={() => toggleFavorite(song.id)}
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '18px', color: favorites.includes(song.id) ? '#f5c518' : '#ccc', padding: 0, lineHeight: 1 }}
+                  aria-label={favorites.includes(song.id) ? 'Unfavorite' : 'Favorite'}
+                >
+                  {favorites.includes(song.id) ? '★' : '☆'}
+                </button>
                 <button
                   onClick={() => openSongForPreview(song)}
                   style={{ textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontWeight: 'bold', fontFamily: 'inherit', fontSize: '14px' }}
@@ -1294,20 +1522,10 @@ function App() {
                 <div style={{ fontFamily: 'inherit', fontSize: '14px' }}>{song.bpm || '—'}</div>
                 <div style={{ color: '#666', fontFamily: 'inherit', fontSize: '14px' }}>{song.createdAt ? new Date(song.createdAt).toLocaleDateString() : '—'}</div>
                 <div style={{ color: '#666', fontFamily: 'inherit', fontSize: '14px' }}>{song.addedBy || '—'}</div>
-                <button
-                  onClick={() => toggleFavorite(song.id)}
-                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '18px', color: favorites.includes(song.id) ? '#f5c518' : '#ccc', padding: 0, lineHeight: 1 }}
-                  aria-label={favorites.includes(song.id) ? 'Unfavorite' : 'Favorite'}
-                >
-                  {favorites.includes(song.id) ? '★' : '☆'}
-                </button>
               </div>
             ))}
           </div>
         )}
-        <div style={{ marginTop: '20px', color: '#666', fontSize: '14px' }}>
-          Can't find what you're looking for? Submit a request!
-        </div>
       </div>
     );
   }
@@ -1548,7 +1766,7 @@ function App() {
     );
 
     return (
-      <div style={{ padding: '40px', maxWidth: '700px', margin: '0 auto', fontFamily: 'Georgia, serif' }}>
+      <div style={{ padding: '40px', maxWidth: '700px', margin: '0 auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
           <h2 style={{ margin: 0, fontSize: '18px' }}>Final View</h2>
           <button onClick={() => confirmBeforeLeaving('browse')}>Back to Songs</button>
@@ -1564,55 +1782,72 @@ function App() {
           const words = isInstrumental ? [] : getDisplayWords(getWords(block.text), block.id, chords).slice(0, -1);
           const sectionLabel = sections[block.id];
           const slots = instrumentalChords[block.id] || [];
+          const hasVisibleChords = slots.some((chord) => chord); // for instrumental
           const hasChordRow = isInstrumental
-            || words.some((_, wordIndex) => chords[`${block.id}-${wordIndex}`])
-            || slots.some((chord) => chord);
+            ? hasVisibleChords
+            : words.some((_, wordIndex) => chords[`${block.id}-${wordIndex}`]) || slots.some((chord) => chord);
+          const bottomMargin = isInstrumental ? (hasVisibleChords ? '12px' : '4px') : '2px';
 
           return (
-            <div key={block.id} style={{ marginBottom: isInstrumental ? '18px' : '2px' }}>
+            <div key={block.id} style={{ marginBottom: bottomMargin }}>
               {sectionLabel && (
-                <div style={{
-                  display: 'inline-block', background: '#f5f5f5', color: '#333', border: '1px solid #000',
-                  padding: '2px 10px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginBottom: '6px'
-                }}>
-                  {sectionLabel.toUpperCase()}
+                <div style={{ marginTop: '18px', marginBottom: '5px' }}>
+                  <span style={{
+                    display: 'inline-block',
+                    fontSize: '11px', fontWeight: '600', letterSpacing: '0.08em',
+                    color: '#111', textTransform: 'uppercase',
+                    fontFamily: 'inherit', padding: '2px 8px', borderRadius: '4px',
+                    border: '1.5px solid #ccc',
+                  }}>
+                    {sectionLabel}
+                  </span>
                 </div>
               )}
 
               {isInstrumental ? (
-                <div style={{ display: 'flex', gap: '16px', minHeight: '14px' }}>
+                hasVisibleChords ? (
+                <div style={{ display: 'flex', gap: '16px' }}>
                   {slots.map((chord, slotIndex) => (
                     chord && (
-                      <div key={slotIndex} style={{ color: 'blue', fontWeight: 'bold' }}>
+                      <div key={slotIndex} style={{ color: CHORD_COLOR, fontWeight: '600', fontSize: '13px' }}>
                         {chord}
                       </div>
                     )
                   ))}
                 </div>
+                ) : null
               ) : hasChordRow ? (
-                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', columnGap: '5px' }}>
                   {words.map((word, wordIndex) => {
-                    const key = `${block.id}-${wordIndex}`;
-                    const chord = chords[key];
+                    const chord = chords[`${block.id}-${wordIndex}`];
                     return (
-                      <div key={wordIndex} style={{ textAlign: 'center', fontSize: '16px' }}>
-                        <div style={{ color: 'blue', fontWeight: 'bold', minHeight: '14px', fontSize: '14px' }}>
-                          {chord || '\u00A0'}
-                        </div>
-                        <div style={{ marginTop: '-2px', fontSize: '16px' }}>{word}</div>
-                      </div>
+                      <span key={wordIndex} style={{ display: 'inline-flex', flexDirection: 'column' }}>
+                        <span style={{
+                          display: 'block', minHeight: '13px',
+                          color: CHORD_COLOR, fontWeight: '600', fontSize: '13px',
+                          whiteSpace: 'nowrap', lineHeight: 1,
+                        }}>
+                          {chord || ''}
+                        </span>
+                        <span style={{ fontSize: '16px', lineHeight: '1.4' }}>{word || ' '}</span>
+                      </span>
                     );
                   })}
-                  {slots.map((chord, slotIndex) => (
-                    chord && (
-                      <div key={`extra-${slotIndex}`} style={{ color: 'blue', fontWeight: 'bold', fontSize: '14px' }}>
+                  {slots.filter(c => c).map((chord, slotIndex) => (
+                    <span key={`extra-${slotIndex}`} style={{ display: 'inline-flex', flexDirection: 'column' }}>
+                      <span style={{
+                        display: 'block',
+                        color: CHORD_COLOR, fontWeight: '600', fontSize: '13px',
+                        whiteSpace: 'nowrap', lineHeight: 1,
+                      }}>
                         {chord}
-                      </div>
-                    )
+                      </span>
+                      <span style={{ fontSize: '16px', lineHeight: '1.4' }}>&nbsp;</span>
+                    </span>
                   ))}
                 </div>
               ) : (
-                <div style={{ fontSize: '16px' }}>{block.text}</div>
+                <div style={{ fontSize: '16px', lineHeight: '1.4' }}>{block.text}</div>
               )}
             </div>
           );
@@ -1650,9 +1885,9 @@ function App() {
         <button onClick={saveEditedSong}>Save</button>
         <button onClick={goToPreview}>Preview</button>
       </div>
-      <p style={{ color: '#666' }}>Type a chord directly, or use + Section to label a section. Tab moves between fields, Shift+Tab goes back. Hover the thin gaps to insert a new line.</p>
+      <p style={{ color: '#666' }}>Type a chord directly. Hover ▶ on the left of any line to mark it as a section start — the box covers everything until the next section. Hover the thin gaps between lines to insert a new line.</p>
 
-      <InsertBar onClick={() => insertSectionAt(0)} />
+      <InsertBar onClick={() => insertEmptyLineAt(0)} />
 
       {(() => {
         const sectionGroups = groupBlocksIntoSections(blocks, sections);
@@ -1664,117 +1899,141 @@ function App() {
           const slots = instrumentalChords[block.id] || [];
           const currentGlobalIndex = globalIndex;
           globalIndex += 1;
+          const isSectionStart = sections[block.id] !== undefined;
 
           return (
             <React.Fragment key={block.id}>
-              <div style={{ marginBottom: '8px' }}>
-                {isInstrumental ? (
-                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-                    <ChordSlotRow
-                      blockId={block.id}
-                      slots={slots}
-                      onChange={(slotIndex, value) => updateInstrumentalChordValue(block.id, slotIndex, value)}
-                      onRemove={(slotIndex) => removeInstrumentalSlot(block.id, slotIndex)}
-                    />
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
-                    {getDisplayWords(words, block.id, chords).map((word, wordIndex) => (
-                      <div key={wordIndex} style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                        <input
-                          data-key={`${block.id}-${wordIndex}`}
-                          data-block-id={block.id}
-                          value={chords[`${block.id}-${wordIndex}`] || ''}
-                          onChange={(e) => updateChordValue(block.id, wordIndex, e.target.value)}
-                          onKeyDown={(e) => {
-                            focusCounterpartOnVerticalArrow(e, `word-${block.id}-${wordIndex}`);
-                            if (e.shiftKey && e.key === 'Enter') {
-                              focusNextLineOnShiftEnter(e);
-                              return;
-                            }
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              splitBlockAtWord(currentGlobalIndex, wordIndex);
-                              return;
-                            }
-                            if (e.key === ' ') {
-                              e.preventDefault();
-                              insertWordAt(block.id, wordIndex);
-                              return;
-                            }
-                            if (
-                              e.key === 'Backspace' && wordIndex === 0
-                              && e.target.selectionStart === 0 && e.target.selectionEnd === 0
-                            ) {
-                              e.preventDefault();
-                              mergeBlockIntoPrevious(currentGlobalIndex);
-                            }
-                          }}
-                          placeholder="+"
-                          style={CHORD_INPUT_STYLE}
-                        />
-                        <input
-                          data-key={`word-${block.id}-${wordIndex}`}
-                          data-block-id={block.id}
-                          tabIndex={-1}
-                          value={word}
-                          size={Math.max(word.length, 1)}
-                          onChange={(e) => updateWordText(block.id, wordIndex, e.target.value)}
-                          onKeyDown={(e) => {
-                            focusCounterpartOnVerticalArrow(e, `${block.id}-${wordIndex}`);
-                            focusAdjacentWordOnTab(e);
-                            if (e.shiftKey && e.key === 'Enter') {
-                              focusNextLineOnShiftEnter(e);
-                              return;
-                            }
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              splitBlockAtWord(currentGlobalIndex, wordIndex);
-                              return;
-                            }
-                            if (e.key === ' ') {
-                              e.preventDefault();
-                              splitWordAt(block.id, wordIndex, e.target.selectionStart);
-                              return;
-                            }
-                            if (e.key === 'ArrowRight' && e.target.selectionStart === e.target.value.length) {
-                              const next = document.querySelector(`[data-key="word-${block.id}-${wordIndex + 1}"]`);
-                              if (next) {
-                                e.preventDefault();
-                                next.focus();
-                                next.setSelectionRange(0, 0);
-                              }
-                              return;
-                            }
-                            if (e.key === 'ArrowLeft' && e.target.selectionStart === 0 && wordIndex > 0) {
-                              const prev = document.querySelector(`[data-key="word-${block.id}-${wordIndex - 1}"]`);
-                              if (prev) {
-                                e.preventDefault();
-                                prev.focus();
-                                prev.setSelectionRange(prev.value.length, prev.value.length);
-                              }
-                              return;
-                            }
-                            if (
-                              e.key === 'Backspace'
-                              && e.target.selectionStart === 0 && e.target.selectionEnd === 0
-                            ) {
-                              e.preventDefault();
-                              if (wordIndex === 0) {
-                                mergeBlockIntoPrevious(currentGlobalIndex);
-                              } else {
-                                mergeWordIntoPrevious(block.id, wordIndex);
-                              }
-                            }
-                          }}
-                          style={WORD_INPUT_STYLE}
+              <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'flex-start' }}>
+                <SectionToggleStrip
+                  isSectionStart={isSectionStart}
+                  onToggle={() => toggleSectionAt(block.id)}
+                />
+                <div style={{ flex: 1 }}>
+                  {isInstrumental ? (
+                    <div>
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                        <ChordSlotRow
+                          blockId={block.id}
+                          slots={slots}
+                          onChange={(slotIndex, value) => updateInstrumentalChordValue(block.id, slotIndex, value)}
+                          onRemove={(slotIndex) => removeInstrumentalSlot(block.id, slotIndex)}
+                          onEnter={() => insertEmptyLineAt(currentGlobalIndex + 1)}
+                          onDeleteLine={() => deleteEmptyBlock(block.id, currentGlobalIndex)}
                         />
                       </div>
-                    ))}
-                  </div>
-                )}
+                      <input
+                        key={`lyric-convert-${block.id}`}
+                        defaultValue=""
+                        placeholder="add lyrics…"
+                        onChange={(e) => {
+                          if (e.target.value) convertInstrumentalToLyric(block.id, e.target.value, currentGlobalIndex);
+                        }}
+                        style={{
+                          display: 'block', fontSize: '14px', color: '#aaa', fontFamily: 'inherit',
+                          border: 'none', borderBottom: '1px dashed transparent', background: 'transparent',
+                          outline: 'none', padding: '2px 0', marginTop: '2px', width: '160px', cursor: 'text',
+                        }}
+                        onFocus={(e) => { e.target.style.borderBottomColor = '#ddd'; }}
+                        onBlur={(e) => { e.target.style.borderBottomColor = 'transparent'; }}
+                      />
+                    </div>
+                  ) : (
+                    <div style={{ paddingTop: '18px', position: 'relative' }}>
+                      {getDisplayWords(words, block.id, chords).map((word, wordIndex) => (
+                        <span key={wordIndex} style={{ position: 'relative', display: 'inline-block', marginRight: '5px', minWidth: '56px' }}>
+                          <input
+                            data-key={`${block.id}-${wordIndex}`}
+                            data-block-id={block.id}
+                            value={chords[`${block.id}-${wordIndex}`] || ''}
+                            onChange={(e) => updateChordValue(block.id, wordIndex, e.target.value)}
+                            onKeyDown={(e) => {
+                              focusCounterpartOnVerticalArrow(e, `word-${block.id}-${wordIndex}`);
+                              if (e.shiftKey && e.key === 'Enter') {
+                                focusNextLineOnShiftEnter(e);
+                                return;
+                              }
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                splitBlockAtWord(currentGlobalIndex, wordIndex);
+                                return;
+                              }
+                              if (e.key === ' ') {
+                                e.preventDefault();
+                                insertWordAt(block.id, wordIndex);
+                                return;
+                              }
+                              if (
+                                e.key === 'Backspace' && wordIndex === 0
+                                && e.target.selectionStart === 0 && e.target.selectionEnd === 0
+                              ) {
+                                e.preventDefault();
+                                mergeBlockIntoPrevious(currentGlobalIndex);
+                              }
+                            }}
+                            style={CHORD_INPUT_STYLE}
+                          />
+                          <input
+                            data-key={`word-${block.id}-${wordIndex}`}
+                            data-block-id={block.id}
+                            tabIndex={-1}
+                            value={word}
+                            size={Math.max(word.length, 1)}
+                            onChange={(e) => updateWordText(block.id, wordIndex, e.target.value)}
+                            onKeyDown={(e) => {
+                              focusCounterpartOnVerticalArrow(e, `${block.id}-${wordIndex}`);
+                              focusAdjacentWordOnTab(e);
+                              if (e.shiftKey && e.key === 'Enter') {
+                                focusNextLineOnShiftEnter(e);
+                                return;
+                              }
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                splitBlockAtWord(currentGlobalIndex, wordIndex);
+                                return;
+                              }
+                              if (e.key === ' ') {
+                                e.preventDefault();
+                                splitWordAt(block.id, wordIndex, e.target.selectionStart);
+                                return;
+                              }
+                              if (e.key === 'ArrowRight' && e.target.selectionStart === e.target.value.length) {
+                                const next = document.querySelector(`[data-key="word-${block.id}-${wordIndex + 1}"]`);
+                                if (next) {
+                                  e.preventDefault();
+                                  next.focus();
+                                  next.setSelectionRange(0, 0);
+                                }
+                                return;
+                              }
+                              if (e.key === 'ArrowLeft' && e.target.selectionStart === 0 && wordIndex > 0) {
+                                const prev = document.querySelector(`[data-key="word-${block.id}-${wordIndex - 1}"]`);
+                                if (prev) {
+                                  e.preventDefault();
+                                  prev.focus();
+                                  prev.setSelectionRange(prev.value.length, prev.value.length);
+                                }
+                                return;
+                              }
+                              if (
+                                e.key === 'Backspace'
+                                && e.target.selectionStart === 0 && e.target.selectionEnd === 0
+                              ) {
+                                e.preventDefault();
+                                if (wordIndex === 0) {
+                                  mergeBlockIntoPrevious(currentGlobalIndex);
+                                } else {
+                                  mergeWordIntoPrevious(block.id, wordIndex);
+                                }
+                              }
+                            }}
+                            style={WORD_INPUT_STYLE}
+                          />
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-              <InsertBar onClick={() => insertSectionAt(currentGlobalIndex + 1)} />
             </React.Fragment>
           );
         };
@@ -1782,36 +2041,49 @@ function App() {
         return sectionGroups.map((group) => {
           const firstBlock = group.blocks[0];
           const isEditingThisLabel = editingSectionBlockId === firstBlock.id;
+          const hasSection = group.label !== null; // null = no section, '' = unnamed section, string = named
 
           return (
             <React.Fragment key={firstBlock.id}>
-              <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                {group.label && !isEditingThisLabel ? (
-                  <div style={{
-                    display: 'inline-flex', alignItems: 'center', gap: '6px',
-                    background: '#f5f5f5', color: '#333', border: '1px solid #000', padding: '2px 10px',
-                    borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', marginBottom: '6px'
-                  }}>
-                    <span onClick={() => setEditingSectionBlockId(firstBlock.id)} style={{ cursor: 'pointer' }}>
-                      {group.label.toUpperCase()}
-                    </span>
-                    <span onClick={() => removeSection(firstBlock.id)} style={{ cursor: 'pointer', opacity: 0.7 }}>✕</span>
-                  </div>
-                ) : (
-                  <input
-                    data-key={`section-${firstBlock.id}`}
-                    value={sections[firstBlock.id] || ''}
-                    placeholder="+ Section"
-                    onChange={(e) => { setSections({ ...sections, [firstBlock.id]: e.target.value }); markDirty(); }}
-                    onFocus={() => setEditingSectionBlockId(firstBlock.id)}
-                    onBlur={() => setEditingSectionBlockId(null)}
-                    style={SECTION_INPUT_STYLE}
-                  />
-                )}
-              </div>
+              {hasSection && (
+                <div style={{ marginTop: '22px', marginBottom: '3px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {!isEditingThisLabel ? (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                      <span
+                        onClick={() => setEditingSectionBlockId(firstBlock.id)}
+                        style={{
+                          cursor: 'pointer', fontSize: '11px', fontWeight: '600', letterSpacing: '0.08em',
+                          color: group.label ? '#111' : '#aaa',
+                          textTransform: 'uppercase', fontFamily: 'inherit',
+                          padding: '2px 8px', borderRadius: '4px',
+                          border: `1.5px solid ${group.label ? '#ccc' : '#ddd'}`,
+                        }}
+                      >
+                        {group.label || '+ name'}
+                      </span>
+                      <span
+                        onClick={() => removeSection(firstBlock.id)}
+                        style={{ cursor: 'pointer', fontSize: '10px', color: '#bbb', lineHeight: 1 }}
+                        title="Remove section"
+                      >✕</span>
+                    </div>
+                  ) : (
+                    <input
+                      data-key={`section-${firstBlock.id}`}
+                      value={sections[firstBlock.id] || ''}
+                      placeholder="Section name"
+                      onChange={(e) => { setSections({ ...sections, [firstBlock.id]: e.target.value }); markDirty(); }}
+                      onFocus={() => setEditingSectionBlockId(firstBlock.id)}
+                      onBlur={() => setEditingSectionBlockId(null)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setEditingSectionBlockId(null); } }}
+                      style={SECTION_INPUT_STYLE}
+                    />
+                  )}
+                </div>
+              )}
 
-              {group.label ? (
-                <div style={{ border: '1px solid #ddd', borderRadius: '6px', padding: '10px' }}>
+              {hasSection ? (
+                <div style={{ borderLeft: '2px solid #e0e0e0', paddingLeft: '10px', marginBottom: '6px' }}>
                   {group.blocks.map(renderBlockContent)}
                 </div>
               ) : (
